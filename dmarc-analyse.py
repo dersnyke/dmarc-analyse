@@ -20,6 +20,18 @@ msgFailTotalCounter = 0
 readAllReports = False
 showReportDetails = False
 
+def delete_messages_older_than_30_days_in_folder(server):
+    # Look for messages older than 30 days
+    thirty_days_ago = datetime.datetime.now() - datetime.timedelta(days=30)
+    messages = server.search([u'BEFORE', thirty_days_ago])
+
+    if len(messages) > 0:
+        # Delete matching old messages
+        server.delete_messages(messages)
+        print(f"{len(messages)} mail(s) older than 30 days deleted..")
+    else:
+        print(f"No messages older than 30 days found.")
+
 # Search for attachments
 def getDMARCreportAttachment(msg):
     global messageTotalCounter
@@ -106,7 +118,7 @@ def getDMARCreportAttachment(msg):
 
                             # Show what the receiving mailserver did with the received mail(s)
                             for disposition in record.findall("row/policy_evaluated/disposition"):
-                                print("      + record %d: Disposistion/DMARC action: %s" % (recordCount, disposition.text))
+                                print("      + record %d: Disposition/DMARC action: %s" % (recordCount, disposition.text))
 
                             print("    - record %d: FAIL: %d mail(s) send from: %s (More info at https://whatismyipaddress.com/ip/%s)" % (recordCount, count, domainName, sourceIp))
                             # print()
@@ -207,11 +219,16 @@ with IMAPClient(config.IMAP_HOST, use_uid=True, ssl=config.IMAP_PORT) as server:
             # print(rawMsg)
             if getDMARCreportAttachment(rawMsg):  # Get through the attachment(s)
                 failDetectedInDMARCReport = True
-
+            # Set the 'Seen' flag for the processed message
+            server.add_flags(msgid, [b'Seen'])
     else:
         print("No DMARC reports to process in this folder")
         noDMARCreportsToProcess = True
 
+    # Delete messages older than 30 days
+    delete_messages_older_than_30_days_in_folder(server)
+    # Save changes to the folder
+    server.expunge()
     server.logout()  # Ensures a logout
 
 print()
