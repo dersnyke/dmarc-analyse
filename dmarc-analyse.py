@@ -20,6 +20,23 @@ msgFailTotalCounter = 0
 readAllReports = False
 showReportDetails = False
 
+# Helper function to remove namespaces from an XML tree. Some providers
+# include namespaces in their DMARC reports which prevents straightforward
+# element lookups with ``xml.etree.ElementTree``.  Stripping the namespaces
+# allows the existing XPath queries in the script to work regardless of the
+# presence of namespaces.
+def strip_namespace(elem):
+    """Remove namespaces in the passed XML element tree in-place."""
+    for el in elem.iter():
+        if '}' in el.tag:
+            el.tag = el.tag.split('}', 1)[1]
+    return elem
+
+def find_text(elem, path):
+    """Return the text of the element at *path* or ``None`` if not found."""
+    node = elem.find(path)
+    return node.text if node is not None else None
+
 def delete_messages_older_than_30_days_in_folder(server):
     # Look for messages older than 30 days
     thirty_days_ago = datetime.datetime.now() - datetime.timedelta(days=30)
@@ -63,16 +80,29 @@ def getDMARCreportAttachment(msg):
                 print("WARNING: %s files are not supported" % filenameExtension)
                 continue
 
-            # Read the XML tree from dataStr
-            xml = ET.ElementTree(ET.fromstring(dataStr))
+            # Read the XML tree from dataStr and remove potential namespaces
+            root = ET.fromstring(dataStr)
+
+            # Remove possible namespaces so that .find() works regardless of
+            # the provider specific namespace declarations.
+            strip_namespace(root)
+
+            xml = ET.ElementTree(root)
 
             # Read the XML DMARC report
             try:
-                reportSource = xml.find("report_metadata/org_name").text
-                reportID = xml.find("report_metadata/report_id").text
-                reportBeginDate = int(xml.find("report_metadata/date_range/begin").text)
-                reportEndDate = int(xml.find("report_metadata/date_range/end").text)
-                reportFromDomain = xml.find("policy_published/domain").text
+                reportSource = find_text(xml, "report_metadata/org_name")
+                reportID = find_text(xml, "report_metadata/report_id")
+                reportBeginDate = find_text(xml, "report_metadata/date_range/begin")
+                reportEndDate = find_text(xml, "report_metadata/date_range/end")
+                reportFromDomain = find_text(xml, "policy_published/domain")
+
+                # If any of the mandatory fields is missing, skip this report
+                if None in (reportSource, reportID, reportBeginDate, reportEndDate, reportFromDomain):
+                    raise ValueError("Missing mandatory field in DMARC report")
+
+                reportBeginDate = int(reportBeginDate)
+                reportEndDate = int(reportEndDate)
 
                 print("Report: %-14s for %12s (Period %s - %s)" % (reportSource, reportFromDomain, datetime.datetime.fromtimestamp(reportBeginDate), datetime.datetime.fromtimestamp(reportEndDate)))
 
@@ -85,15 +115,18 @@ def getDMARCreportAttachment(msg):
                     try:
                         recordCount += 1
                         failDetected = False
-                        sourceIp = record.find("row/source_ip").text
+                        sourceIp = find_text(record, "row/source_ip")
+                        if sourceIp is None:
+                            raise ValueError("Missing source_ip in record")
                         try:
                             domainName = socket.gethostbyaddr(sourceIp)[0]
                         except  Exception as e:
                             domainName = 'No hostname found'
                             # print("Exception: %s" % str(e))
 
-                        count = int(record.find("row/count").text)
-                        headerFrom = record.find("identifiers/header_from").text
+                        count = find_text(record, "row/count")
+                        headerFrom = find_text(record, "identifiers/header_from")
+                        count = int(count) if count is not None else 0
                         # for selector in record.findall("auth_results/dkim/selector"):
                         #     dkimSelector = selector.text
                         msgReportCount += count
