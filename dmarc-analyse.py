@@ -236,18 +236,12 @@ with IMAPClient(config.IMAP_HOST, use_uid=True, ssl=config.IMAP_PORT) as server:
     failDetectedInDMARCReport = False
     noDMARCreportsToProcess = False
     if len(messages) != 0:
-        # response = server.fetch(messages, ['FLAGS', 'BODY', 'RFC822.SIZE', 'ENVELOPE', 'RFC822'])
-        response = server.fetch(messages, ['FLAGS', 'BODY', 'ENVELOPE', 'RFC822'])
+        # Request only the full RFC822 message to avoid provider specific
+        # protocol quirks triggered by fetching BODY/ENVELOPE separately.
+        response = server.fetch(messages, ['RFC822'])
 
         # Process all received messages
         for msgid, data in response.items():  # Iterates through the collection and assigns to 2 variables one by one
-            # print('   ID %d: flags=%s' % (msgid, data[b'FLAGS']))
-            # envelope = data[b'ENVELOPE']
-            # print("Mail:", envelope.subject.decode())  # Gets the subject
-            envelope = data[b'ENVELOPE']
-            # date = envelope.date
-            # subject = envelope.subject
-            # subjectArray = subject.split(' ')
             rawMsg = email.message_from_bytes(data[b'RFC822'])  # Return a message object structure from a bytes-like object[6]
             # print(rawMsg)
             if getDMARCreportAttachment(rawMsg):  # Get through the attachment(s)
