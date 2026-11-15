@@ -53,6 +53,7 @@ def delete_messages_older_than_30_days_in_folder(server):
 def getDMARCreportAttachment(msg):
     global messageTotalCounter
     global msgFailTotalCounter
+    failDetectedInReport = False
 
     # Takes the raw data and breaks it into different 'parts' & python processes it 1 at a time [1]
     for part in msg.walk():
@@ -65,23 +66,32 @@ def getDMARCreportAttachment(msg):
         filename = part.get_filename()  # Get the filename
         # print("Filename: ", filename)
         if bool(filename):  # Check if filename is given
-            filenameExtension = os.path.splitext(filename)[1]
+            filenameExtension = os.path.splitext(filename)[1].lower()
             # print("file extension:", filenameExtension)
 
-            # Decompress attachments in memory and put the file content in dataStr
-            if filenameExtension == ".zip":
-                dataStrCompressed = io.BytesIO(part.get_payload(decode=True))
-                input_zip=ZipFile(dataStrCompressed)
-                with input_zip.open(input_zip.namelist()[0], 'r') as f:
-                    dataStr = f.read()
-            elif filenameExtension == ".gz":
-                dataStr = gzip.decompress(part.get_payload(decode=True))
-            else:
+            if filenameExtension not in (".zip", ".gz", ".xml"):
                 print("WARNING: %s files are not supported" % filenameExtension)
                 continue
 
-            # Read the XML tree from dataStr and remove potential namespaces
-            root = ET.fromstring(dataStr)
+            try:
+                # Decompress attachments in memory and parse their XML.
+                if filenameExtension == ".zip":
+                    dataStrCompressed = io.BytesIO(part.get_payload(decode=True))
+                    with ZipFile(dataStrCompressed) as input_zip:
+                        with input_zip.open(input_zip.namelist()[0], 'r') as f:
+                            dataStr = f.read()
+                elif filenameExtension == ".gz":
+                    dataStr = gzip.decompress(part.get_payload(decode=True))
+                else:
+                    dataStr = part.get_payload(decode=True)
+
+                root = ET.fromstring(dataStr)
+            except Exception as e:
+                print("Exception: %s" % str(e))
+                traceback.print_exc()
+                print("WARNING: Something went wrong while reading the XML report attachment")
+                failDetectedInReport = True
+                continue
 
             # Remove possible namespaces so that .find() works regardless of
             # the provider specific namespace declarations.
@@ -109,7 +119,7 @@ def getDMARCreportAttachment(msg):
                 recordCount = 0
                 msgReportCount = 0
                 msgFailReportCount = 0
-                failDetectedInReport = False
+                failDetectedInAttachment = False
                 dkimSelector = None
                 for record in xml.findall("record"):
                     try:
@@ -145,6 +155,7 @@ def getDMARCreportAttachment(msg):
 
                         # There is a fail detected in this record
                         if failDetected:
+                            failDetectedInAttachment = True
                             failDetectedInReport = True
                             msgFailReportCount += count
                             msgFailTotalCounter += count
@@ -163,17 +174,17 @@ def getDMARCreportAttachment(msg):
                         print("Exception: %s" % str(e))
                         traceback.print_exc()
                         print("WARNING: Something went wrong in this record of the report")
+                        failDetectedInAttachment = True
                         failDetectedInReport = True
-                if not failDetectedInReport:
+                if not failDetectedInAttachment:
                     print(" Total of %d email(s) checked and all OK!" % (msgReportCount))
                 else:
                     print(" Total of %d email(s) checked and %d emails NOT passed" % (msgReportCount, msgFailReportCount))
-                    failDetectedInReport = True
                 print()
             except Exception as e:
                 print("Exception: %s" % str(e))
                 traceback.print_exc()
-                print("WARNING: Something went wrong while reading the attachment with the zipped XML report")
+                print("WARNING: Something went wrong while reading the XML report attachment")
                 failDetectedInReport = True
     return failDetectedInReport
 
