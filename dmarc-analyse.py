@@ -6,6 +6,7 @@ import os
 import sys
 import traceback
 import email
+from email.header import decode_header, make_header
 import socket
 
 import io
@@ -37,6 +38,25 @@ def find_text(elem, path):
     node = elem.find(path)
     return node.text if node is not None else None
 
+def describe_message(msg, message_uid):
+    """Give enough mail headers to locate a report in a webmail client."""
+    def header(name):
+        value = msg.get(name)
+        if not value:
+            return "(missing)"
+        try:
+            value = str(make_header(decode_header(value)))
+        except Exception:
+            value = str(value)
+        return " ".join(value.split())
+
+    details = "From: %s, Subject: %s, Date: %s" % (
+        header("From"), header("Subject"), header("Date")
+    )
+    if message_uid is not None:
+        return "IMAP UID %s, %s" % (message_uid, details)
+    return details
+
 def delete_messages_older_than_30_days_in_folder(server):
     # Look for messages older than 30 days
     thirty_days_ago = datetime.datetime.now() - datetime.timedelta(days=30)
@@ -54,6 +74,7 @@ def getDMARCreportAttachment(msg, message_uid=None):
     global messageTotalCounter
     global msgFailTotalCounter
     failDetectedInReport = False
+    messageContext = describe_message(msg, message_uid)
 
     # Takes the raw data and breaks it into different 'parts' & python processes it 1 at a time [1]
     for part in msg.walk():
@@ -66,9 +87,7 @@ def getDMARCreportAttachment(msg, message_uid=None):
         filename = part.get_filename()  # Get the filename
         # print("Filename: ", filename)
         if bool(filename):  # Check if filename is given
-            attachmentContext = "attachment %r" % filename
-            if message_uid is not None:
-                attachmentContext = "IMAP UID %s, %s" % (message_uid, attachmentContext)
+            attachmentContext = "%s, attachment %r" % (messageContext, filename)
             filenameExtension = os.path.splitext(filename)[1].lower()
             # print("file extension:", filenameExtension)
 
@@ -105,14 +124,16 @@ def getDMARCreportAttachment(msg, message_uid=None):
             # Read the XML DMARC report
             try:
                 reportSource = find_text(xml, "report_metadata/org_name")
-                reportBeginDate = find_text(xml, "report_metadata/date_range/begin")
-                reportEndDate = find_text(xml, "report_metadata/date_range/end")
+                reportBeginDate = (find_text(xml, "report_metadata/date_range/begin")
+                                   or find_text(xml, "report_metadata/data_range/begin"))
+                reportEndDate = (find_text(xml, "report_metadata/date_range/end")
+                                 or find_text(xml, "report_metadata/data_range/end"))
                 reportFromDomain = find_text(xml, "policy_published/domain")
 
                 requiredFields = {
                     "report_metadata/org_name": reportSource,
-                    "report_metadata/date_range/begin": reportBeginDate,
-                    "report_metadata/date_range/end": reportEndDate,
+                    "report_metadata/date_range or data_range/begin": reportBeginDate,
+                    "report_metadata/date_range or data_range/end": reportEndDate,
                     "policy_published/domain": reportFromDomain,
                 }
                 missingFields = [path for path, value in requiredFields.items() if not value or not value.strip()]
