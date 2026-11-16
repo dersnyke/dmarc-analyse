@@ -6,6 +6,7 @@ import os
 import sys
 import traceback
 import email
+from email.header import decode_header, make_header
 import socket
 
 import io
@@ -37,6 +38,25 @@ def find_text(elem, path):
     node = elem.find(path)
     return node.text if node is not None else None
 
+def describe_message(msg, message_uid):
+    """Give enough mail headers to locate a report in a webmail client."""
+    def header(name):
+        value = msg.get(name)
+        if not value:
+            return "(missing)"
+        try:
+            value = str(make_header(decode_header(value)))
+        except Exception:
+            value = str(value)
+        return " ".join(value.split())
+
+    details = "From: %s, Subject: %s, Date: %s" % (
+        header("From"), header("Subject"), header("Date")
+    )
+    if message_uid is not None:
+        return "IMAP UID %s, %s" % (message_uid, details)
+    return details
+
 def delete_messages_older_than_30_days_in_folder(server):
     # Look for messages older than 30 days
     thirty_days_ago = datetime.datetime.now() - datetime.timedelta(days=30)
@@ -50,10 +70,11 @@ def delete_messages_older_than_30_days_in_folder(server):
         print(f"No messages older than 30 days found.")
 
 # Search for attachments
-def getDMARCreportAttachment(msg):
+def getDMARCreportAttachment(msg, message_uid=None):
     global messageTotalCounter
     global msgFailTotalCounter
     failDetectedInReport = False
+    messageContext = describe_message(msg, message_uid)
 
     # Takes the raw data and breaks it into different 'parts' & python processes it 1 at a time [1]
     for part in msg.walk():
@@ -66,11 +87,12 @@ def getDMARCreportAttachment(msg):
         filename = part.get_filename()  # Get the filename
         # print("Filename: ", filename)
         if bool(filename):  # Check if filename is given
+            attachmentContext = "%s, attachment %r" % (messageContext, filename)
             filenameExtension = os.path.splitext(filename)[1].lower()
             # print("file extension:", filenameExtension)
 
             if filenameExtension not in (".zip", ".gz", ".xml"):
-                print("WARNING: %s files are not supported" % filenameExtension)
+                print("WARNING: %s: %s files are not supported" % (attachmentContext, filenameExtension))
                 continue
 
             try:
@@ -89,7 +111,7 @@ def getDMARCreportAttachment(msg):
             except Exception as e:
                 print("Exception: %s" % str(e))
                 traceback.print_exc()
-                print("WARNING: Something went wrong while reading the XML report attachment")
+                print("WARNING: %s: Could not read the XML report attachment" % attachmentContext)
                 failDetectedInReport = True
                 continue
 
@@ -102,14 +124,23 @@ def getDMARCreportAttachment(msg):
             # Read the XML DMARC report
             try:
                 reportSource = find_text(xml, "report_metadata/org_name")
-                reportID = find_text(xml, "report_metadata/report_id")
-                reportBeginDate = find_text(xml, "report_metadata/date_range/begin")
-                reportEndDate = find_text(xml, "report_metadata/date_range/end")
+                reportBeginDate = (find_text(xml, "report_metadata/date_range/begin")
+                                   or find_text(xml, "report_metadata/data_range/begin"))
+                reportEndDate = (find_text(xml, "report_metadata/date_range/end")
+                                 or find_text(xml, "report_metadata/data_range/end"))
                 reportFromDomain = find_text(xml, "policy_published/domain")
 
-                # If any of the mandatory fields is missing, skip this report
-                if None in (reportSource, reportID, reportBeginDate, reportEndDate, reportFromDomain):
-                    raise ValueError("Missing mandatory field in DMARC report")
+                requiredFields = {
+                    "report_metadata/org_name": reportSource,
+                    "report_metadata/date_range or data_range/begin": reportBeginDate,
+                    "report_metadata/date_range or data_range/end": reportEndDate,
+                    "policy_published/domain": reportFromDomain,
+                }
+                missingFields = [path for path, value in requiredFields.items() if not value or not value.strip()]
+                if missingFields:
+                    print("WARNING: %s: Missing DMARC fields: %s" % (attachmentContext, ", ".join(missingFields)))
+                    failDetectedInReport = True
+                    continue
 
                 reportBeginDate = int(reportBeginDate)
                 reportEndDate = int(reportEndDate)
@@ -184,7 +215,7 @@ def getDMARCreportAttachment(msg):
             except Exception as e:
                 print("Exception: %s" % str(e))
                 traceback.print_exc()
-                print("WARNING: Something went wrong while reading the XML report attachment")
+                print("WARNING: %s: Could not process the XML report attachment" % attachmentContext)
                 failDetectedInReport = True
     return failDetectedInReport
 
@@ -255,7 +286,7 @@ with IMAPClient(config.IMAP_HOST, use_uid=True, ssl=config.IMAP_PORT) as server:
         for msgid, data in response.items():  # Iterates through the collection and assigns to 2 variables one by one
             rawMsg = email.message_from_bytes(data[b'RFC822'])  # Return a message object structure from a bytes-like object[6]
             # print(rawMsg)
-            if getDMARCreportAttachment(rawMsg):  # Get through the attachment(s)
+            if getDMARCreportAttachment(rawMsg, msgid):  # Get through the attachment(s)
                 failDetectedInDMARCReport = True
             # Set the 'Seen' flag for the processed message
             server.add_flags(msgid, [b'Seen'])

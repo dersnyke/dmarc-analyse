@@ -21,7 +21,18 @@ GOOD_XML = b"""<feedback><report_metadata><org_name>Example</org_name>
 <record><row><source_ip>127.0.0.1</source_ip><count>2</count></row>
 <auth_results><dkim><result>pass</result></dkim>
 <spf><result>pass</result></spf></auth_results></record></feedback>"""
-BAD_XML = GOOD_XML.replace(b"<report_id>r1</report_id>", b"")
+BAD_XML = GOOD_XML.replace(b"<org_name>Example</org_name>", b"").replace(
+    b"<domain>example.com</domain>", b""
+)
+ICEWARP_XML = b"""<feedback><report_metadata><org_name>IceWarp Server</org_name>
+<report_id>129-1794610850</report_id><data_range><begin>1794610850</begin>
+<end>1794697253</end></data_range></report_metadata>
+<policy_published><domain>example.com</domain></policy_published>
+<record><row><source_ip>127.0.0.1</source_ip><count>1</count>
+<policy_evaluated><disposition>quarantine</disposition></policy_evaluated></row>
+<identifiers><header_from>example.com</header_from></identifiers>
+<auth_results><spf><domain>example.com</domain><result>fail</result></spf>
+</auth_results></record></feedback>"""
 
 
 def zip_xml(data):
@@ -35,6 +46,8 @@ def run_mail(attachments):
     message = EmailMessage()
     message["From"] = "reports@example.com"
     message["To"] = "admin@example.com"
+    message["Subject"] = "Täglicher DMARC-Bericht"
+    message["Date"] = "Mon, 16 Nov 2026 09:30:00 +0100"
     message.set_content("DMARC report")
     for filename, payload in attachments:
         message.add_attachment(payload, maintype="application", subtype="octet-stream", filename=filename)
@@ -118,23 +131,43 @@ class MailProcessingTests(unittest.TestCase):
     def test_unsupported_attachment_still_finishes(self):
         code, output, errors = run_mail([("notes.txt", b"not a report")])
         self.assertEqual(code, 0, errors)
-        self.assertIn("WARNING: .txt files are not supported", output)
+        self.assertIn("IMAP UID 1, From: reports@example.com", output)
+        self.assertIn("Subject: Täglicher DMARC-Bericht", output)
+        self.assertIn("Date: Mon, 16 Nov 2026 09:30:00 +0100", output)
+        self.assertIn("attachment 'notes.txt': .txt files are not supported", output)
         self.assertIn("DMARC analyse summary:", output)
 
     def test_bad_report_failure_survives_later_good_report(self):
-        code, output, _errors = run_mail([
+        code, output, errors = run_mail([
             ("bad.xml", BAD_XML),
             ("good.xml", GOOD_XML),
         ])
         self.assertEqual(code, 1)
-        self.assertIn("WARNING: Something went wrong while reading the XML report attachment", output)
+        self.assertIn("attachment 'bad.xml': Missing DMARC fields: ", output)
+        self.assertIn("report_metadata/org_name", output)
+        self.assertIn("policy_published/domain", output)
+        self.assertEqual(errors, "")
         self.assertIn("Total of 2 email(s) checked and all OK!", output)
         self.assertIn("Nr of messages checked:  2", output)
+
+    def test_unused_report_id_is_optional(self):
+        xml_without_id = GOOD_XML.replace(b"<report_id>r1</report_id>", b"")
+        code, output, errors = run_mail([("no-id.xml", xml_without_id)])
+        self.assertEqual(code, 0, errors)
+        self.assertIn("Total of 2 email(s) checked and all OK!", output)
+
+    def test_icewarp_data_range_is_processed(self):
+        code, output, errors = run_mail([("icewarp.xml", ICEWARP_XML)])
+        self.assertEqual(code, 1, errors)  # The report records an SPF failure.
+        self.assertIn("Report: IceWarp Server", output)
+        self.assertIn("Nr of messages checked:  1", output)
+        self.assertIn("Nr of messages failed:   1", output)
+        self.assertNotIn("Missing DMARC fields", output)
 
     def test_malformed_xml_does_not_prevent_summary(self):
         code, output, errors = run_mail([("broken.xml", b"<feedback>")])
         self.assertEqual(code, 1)
-        self.assertIn("WARNING: Something went wrong while reading the XML report attachment", output)
+        self.assertIn("attachment 'broken.xml': Could not read", output)
         self.assertIn("DMARC analyse summary:", output)
         self.assertIn("ParseError", errors)
 
